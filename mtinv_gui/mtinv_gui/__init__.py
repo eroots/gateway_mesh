@@ -13,4 +13,4 @@ Workflow:
   5. Write the solver input files (frequencies, data, parameter files).
 """
 
-__version__ = "0.0.70"
+__version__ = "0.0.71"

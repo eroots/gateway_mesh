@@ -86,6 +86,14 @@ def test_notebooks_can_run():
         or spec.argv[0] in ("python", "python3"), f"the notebooks' kernel isn't this environment: {spec.argv}"
 
 
+def test_gateway_mt_and_launcher():
+    """gateway_mt (MT data viewing and editing) and mt_launcher come with the environment."""
+    import gateway_mt  # noqa: F401
+
+    for command in ("gateway_mt", "mt_launcher"):
+        assert shutil.which(command), f"{command} isn't on the PATH: is the environment active?"
+
+
 def test_map_projections_have_their_data():
     import pyproj
     import rasterio.crs

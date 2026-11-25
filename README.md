@@ -19,13 +19,27 @@ viewing and editing MT data, and its `mt_launcher`, a small window that starts g
 
 **Linux or Windows WSL2, x86-64.** Meshes are built with deal.II 9.3, which conda-forge
 provides for Linux only. On Windows 11, WSL2 shows the GUIs without extra setup; on
-Windows 10 you need an X server (see the install guide).
+Windows 10 you need an X server (see [mtinv_gui/README.md](mtinv_gui/README.md#install)).
 
 gateway_mt on its own also runs natively on Windows: see its repository.
 
 ## Install
 
-You need `git` and conda ([Miniforge](https://github.com/conda-forge/miniforge) works well).
+You need `git` and conda.
+
+**On Windows**, set up WSL2 first: in PowerShell, run `wsl --install` (it installs
+Ubuntu; restart when asked), then open Ubuntu from the Start menu and run everything
+below there. Ubuntu comes with `git`.
+
+**If you don't have conda**, [Miniforge](https://github.com/conda-forge/miniforge) works
+well. Install it, then close and reopen the terminal:
+
+```bash
+curl -L -O https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+bash Miniforge3-Linux-x86_64.sh
+```
+
+Then:
 
 ```bash
 git clone https://github.com/eroots/gateway_mesh.git
