@@ -418,7 +418,7 @@ dependencies:
       - pyshp==3.1.6
       # SimPEG mesh output (a discretize TreeMesh); no dependencies beyond numpy / scipy
       - discretize==0.11.3
-      # Commit pin: older gateway_mt commits require vtk>=9.3 and
+      # Pinned to a release tag: older gateway_mt code requires vtk>=9.3 and
       # pyproj>=3.6, and pip would replace the pinned builds above to satisfy them.
-      - gateway_mt @ git+https://github.com/eroots/gateway_mt.git@2375aa613a2745908668c6177a3202854ae6b4eb
+      - gateway_mt @ git+https://github.com/eroots/gateway_mt.git@v0.20.0
       - -e .
