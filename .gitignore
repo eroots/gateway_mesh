@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local only: not for publishing
+CLAUDE.md
+example_data/
+example_notebooks/
+mtinv_gui/tests/test_local_data.py
+
+# Sample EDIs: edis/*.edi is in the repository, older leftovers aren't
+edis/redo/
+edis/rm.lst
+
+# Example / test data (large or machine-specific)
+edis_interp/
+*.vtu
+*.vtk
+*.tria
+*.mask
+*.materials
+*.npz
+*.nc
+*.tif
+*.tiff
+*.h5
+receivers_*.csv
+*.mtinv.json
+*.mtplot.json
+
+# What the notebooks write
+mtinv_gui/notebooks/work/
+.ipynb_checkpoints/
+
+# pip install -e leftovers
+*.egg-info/
+build/

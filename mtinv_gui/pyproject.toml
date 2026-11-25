@@ -1,0 +1,39 @@
+# Installed by environment.yml, which also supplies every dependency (deal.II
+# isn't available from pip, so they are not listed here).  The install is
+# editable: the commands run the code in this folder, so edits take effect
+# without reinstalling.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gateway_mesh"
+dynamic = ["version"]
+description = "3-D MT inversion setup (mesh, data, GoFEM files) and model plotting GUIs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-only" }
+authors = [{ name = "Eric Roots" }]
+keywords = ["magnetotellurics", "geophysics", "inversion", "GoFEM", "mesh", "deal.II"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/eroots/gateway_mesh"
+
+[project.scripts]
+mtinv = "mtinv_gui.gui.app:main"                    # inversion setup GUI
+mtplot = "mtinv_gui.plotting.gui.app:main"          # model plotting GUI
+mtplot-batch = "mtinv_gui.plotting.batch:main"      # export a project's figure recipes
+
+[tool.setuptools.dynamic]
+version = { attr = "mtinv_gui.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["mtinv_gui*"]
