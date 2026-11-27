@@ -11,10 +11,10 @@ import math
 import os
 import traceback
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QSplitter, QToolBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QSplitter, QToolBox,
     QVBoxLayout, QWidget,
 )
 
@@ -72,6 +72,53 @@ def _shape_key(label: str) -> str:
 def _shape_label(key: str) -> str:
     """Stored shape key -> combo display text, e.g. 'convex_hull' -> 'Convex Hull'."""
     return " ".join(w.capitalize() for w in str(key).split("_")) or "Ellipse"
+
+
+class _CellCountAsker(QObject):
+    """``confirm(info) -> bool`` for :func:`mesh.run`, callable from the build's worker
+    thread: the question is shown on the GUI thread while the worker waits for it."""
+
+    _ask = pyqtSignal(object)
+
+    def __init__(self, parent_widget):
+        super().__init__(parent_widget)
+        self._widget = parent_widget
+        self._answer = False
+        self._ask.connect(self._on_ask, Qt.BlockingQueuedConnection)
+
+    def confirm(self, info: dict) -> bool:
+        if QThread.currentThread() is self.thread():       # GUI thread: ask directly
+            self._on_ask(info)
+        else:
+            self._ask.emit(info)                             # waits for _on_ask
+        return self._answer
+
+    @staticmethod
+    def message(info: dict) -> str:
+        n, n0, cp = info["n_cells"], info["n_now"], info["checkpoint"]
+        if n0 == 0:
+            what = f"The base grid alone has <b>{n:,}</b> cells"
+        elif info["predicted"]:
+            what = (f"{info['step'].capitalize()} is about to take the mesh from {n0:,} to "
+                    f"<b>at least {n:,}</b> cells")
+        else:
+            what = f"{info['step'].capitalize()} took the mesh from {n0:,} to <b>{n:,}</b> cells"
+        return (f"{what}, past {cp:,}.<br><br>A mesh this size takes a long time to build and "
+                "write, needs a lot of memory, and makes a large inversion. If it isn't what you "
+                "meant, stop here and check the base cells and the refinement levels / buffers.<br><br>"
+                "Continue building?")
+
+    def _on_ask(self, info):
+        box = QMessageBox(self._widget)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Large mesh")
+        box.setTextFormat(Qt.RichText)
+        box.setText(self.message(info))
+        go = box.addButton("Continue", QMessageBox.AcceptRole)
+        stop = box.addButton("Stop the build", QMessageBox.RejectRole)
+        box.setDefaultButton(stop)
+        box.exec_()
+        self._answer = box.clickedButton() is go
 
 
 class MeshPanel(BasePanel):
@@ -1369,8 +1416,10 @@ class MeshPanel(BasePanel):
         spec = self._spec()
         step = self.step.value()
         out_dir = mesh.mesh_output_dir(self.project)
+        confirm = self._asker().confirm           # made here, on the GUI thread
         if self._start_build(
-                lambda: mesh.run(spec, out_dir, self.log, stop_after_refinement=step),
+                lambda: mesh.run(spec, out_dir, self.log, stop_after_refinement=step,
+                                 confirm=confirm),
                 self._after_preview):
             self.result_lbl.setText(f"building to step {step}…")
 
@@ -1389,7 +1438,8 @@ class MeshPanel(BasePanel):
             return
         spec = self._spec()
         out_dir = mesh.mesh_output_dir(self.project)
-        if self._start_build(lambda: mesh.run(spec, out_dir, self.log),
+        confirm = self._asker().confirm           # made here, on the GUI thread
+        if self._start_build(lambda: mesh.run(spec, out_dir, self.log, confirm=confirm),
                              self._after_full):
             self.result_lbl.setText(
                 f"building full mesh into {out_dir} … a fine recipe can take "
@@ -1420,8 +1470,18 @@ class MeshPanel(BasePanel):
         self._refresh_out_dir_lbl()
         self.notify_changed()
 
+    def _asker(self) -> _CellCountAsker:
+        a = getattr(self, "_cell_asker", None)
+        if a is None:
+            a = self._cell_asker = _CellCountAsker(self)
+        return a
+
     def _error(self, exc: Exception):
         self._busy_build(False)
+        if isinstance(exc, mesh.MeshBuildCancelled):
+            self.log(f"mesh build stopped: {exc}; nothing was written")
+            self.result_lbl.setText(f"<b>build stopped</b> ({exc}); nothing was written.")
+            return
         self.log(f"ERROR: {exc}")
         self.result_lbl.setText(
             "<b>BUILD FAILED:</b> " + str(exc) + "<pre>" + "".join(

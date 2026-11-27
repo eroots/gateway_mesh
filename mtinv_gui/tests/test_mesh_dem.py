@@ -282,6 +282,78 @@ def test_download_size_estimates():
     assert rs.z.shape == (r["ny"], r["nx"]), (rs.z.shape, r)
 
 
+
+def test_cell_count_checkpoints_ask_and_stop():
+    """mesh.run asks before passing each checkpoint (base grid, predicted and actual
+    refinement counts); a no stops the build before anything is written."""
+    from dataclasses import asdict
+
+    from mtinv_gui.backends import edi_io
+    from mtinv_gui.backends import mesh as M
+    from mtinv_gui.backends.mesh_design import RefinementStage
+    from mtinv_gui.project import Project
+
+    p = Project()
+    p.survey.edi_dir = os.path.join(os.path.dirname(ROOT), "edis")
+    st = edi_io.read_edi_headers(p.survey.edi_dir)
+    p.projection.proj_kind, p.projection.local_proj = "local", "tmerc"
+    p.projection.origin_lon = float(np.mean([s.lon for s in st]))
+    p.projection.origin_lat = float(np.mean([s.lat for s in st]))
+    p.mesh.dx_blocks = [20e3] * 4 + [60e3, 120e3]
+    p.mesh.dz_air = [500.0, 2e3, 10e3, 50e3, 150e3]
+    p.mesh.dz_earth = [500.0, 2e3, 10e3, 50e3, 150e3]
+    p.mesh.use_topography = False
+    p.mesh.refinement_stages = [asdict(RefinementStage(kind="interface", levels=2))]
+    spec = M.mesh_spec_from_project(p)
+    saved = M.CELL_COUNT_CHECKPOINTS
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            n_full = M.run(spec, d, log=QUIET)["n_cells"]        # no confirm: no questions
+        n_base = (2 * len(p.mesh.dx_blocks)) ** 2 * (len(p.mesh.dz_air) + len(p.mesh.dz_earth))
+        assert n_base < n_full // 2, (n_base, n_full)
+        M.CELL_COUNT_CHECKPOINTS = (n_base - 1, n_full // 2)
+        asked = []
+
+        def yes(info):
+            asked.append(info)
+            return True
+
+        with tempfile.TemporaryDirectory() as d:
+            assert M.run(spec, d, log=QUIET, confirm=yes)["n_cells"] == n_full
+        assert [a["checkpoint"] for a in asked] == [n_base - 1, n_full // 2], asked
+        assert asked[0]["n_now"] == 0 and asked[0]["n_cells"] == n_base
+        assert asked[1]["n_cells"] >= n_full // 2 and "refinement" in asked[1]["step"]
+        if asked[1]["predicted"]:                 # asked before the refinement that crosses it
+            assert asked[1]["n_now"] < n_full // 2
+
+        def no_second(info):
+            return info["checkpoint"] != n_full // 2
+
+        for preview in (None, 1):
+            with tempfile.TemporaryDirectory() as d:
+                try:
+                    M.run(spec, d, log=QUIET, confirm=no_second, stop_after_refinement=preview)
+                except M.MeshBuildCancelled:
+                    pass
+                else:
+                    raise AssertionError("the build went on after a no")
+                assert os.listdir(d) == [], os.listdir(d)        # nothing written
+        assert M._preview_cache.tria is None                   # a part-refined preview isn't reused
+
+        def no(info):
+            return False
+
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                M.run(spec, d, log=QUIET, confirm=no)
+            except M.MeshBuildCancelled as exc:
+                assert f"{n_base - 1:,}" in str(exc)
+            else:
+                raise AssertionError("the base-grid check didn't stop the build")
+    finally:
+        M.CELL_COUNT_CHECKPOINTS = saved
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

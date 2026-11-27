@@ -208,6 +208,22 @@ class RefineInfo:
     existing_data: str = ""         # .gdat
     existing_frequencies: str = ""
     active_domain_box: str = ""     # the inversion's: n0, e0, z0, n1, e1, z1 in metres
+    frame_file: str = ""            # model_frame.json, for frame == "file"
+    # workflow "map": put this model's conductivities on another mesh (backends/remap.py)
+    workflow: str = "refine"        # "refine" | "map"
+    target_tria: str = ""
+    target_materials: str = ""
+    target_receivers: str = ""
+    target_frame: str = "project"   # "project" | "file" | "fit" | "manual", as frame
+    target_frame_project: str = ""
+    target_frame_file: str = ""
+    target_frame_fit_edis: str = ""
+    target_frame_crs: str = ""
+    target_frame_x0: float = 0.0
+    target_frame_y0: float = 0.0
+    fill_ids: list[int] = field(default_factory=lambda: [2])   # target ids that get the model's values
+    map_smooth: float = 0.25        # x the old cell's size; 0 = the old cells as they are
+    map_depth: str = "surface"      # "surface": depth below the surface; "elevation"
 
 
 @dataclass

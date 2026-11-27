@@ -259,6 +259,75 @@ class _PreviewCache:
 
 
 _preview_cache = _PreviewCache()
+
+
+# --------------------------------------------------------------------------- #
+# cell-count checkpoints: ask before a build grows past them
+# --------------------------------------------------------------------------- #
+#: a build asks (through ``run(confirm=...)``) before going past each of these
+CELL_COUNT_CHECKPOINTS = (500_000, 1_000_000)
+
+
+class MeshBuildCancelled(Exception):
+    """The user declined to go on past a cell-count checkpoint."""
+
+
+class CellCountGuard:
+    """Asks ``confirm(info) -> bool`` once per checkpoint the cell count reaches;
+    raises :class:`MeshBuildCancelled` on a no.
+
+    ``info``: ``n_cells`` (the count, or a lower bound when ``predicted``), ``n_now``
+    (cells before the step), ``checkpoint`` (the largest one reached), ``step`` (what is
+    about to run, or just ran), ``predicted``."""
+
+    def __init__(self, confirm, checkpoints=CELL_COUNT_CHECKPOINTS, log=print):
+        self.confirm = confirm
+        self.pending = sorted(int(c) for c in checkpoints)
+        self.log = log
+        self.step = ""
+
+    def check(self, n_cells: int, *, n_now: int, predicted: bool) -> None:
+        reached = [c for c in self.pending if n_cells >= c]
+        if not reached or self.confirm is None:
+            return
+        self.pending = [c for c in self.pending if c not in reached]
+        info = dict(n_cells=int(n_cells), n_now=int(n_now), checkpoint=reached[-1],
+                    step=self.step, predicted=predicted)
+        if not self.confirm(info):
+            if n_now == 0:
+                self.log("build stopped by the user: the base grid would have %d cells" % n_cells)
+            elif predicted:
+                self.log("build stopped by the user at %d cells (%s would make at least %d)"
+                         % (n_now, self.step or "the next step", n_cells))
+            else:
+                self.log("build stopped by the user: %s made %d cells" % (self.step, n_cells))
+            raise MeshBuildCancelled(
+                "stopped before going past %s cells" % f"{reached[-1]:,}")
+        self.log("continuing past %s cells (user confirmed)" % f"{reached[-1]:,}")
+
+
+class _GuardedTria:
+    """A triangulation stand-in for the refinement helpers (pyGoFEM's only call
+    ``dim``, ``active_cells`` and ``execute_coarsening_and_refinement``): before a
+    refinement runs, it predicts the new count from the flags (8 children each, so
+    +7; deal.II's smoothing can add ~10 % more, so it's a lower bound) and checks it;
+    after, it checks the real count, catching what the prediction missed before the
+    next step."""
+
+    def __init__(self, tria, guard: CellCountGuard):
+        self._tria = tria
+        self._guard = guard
+
+    def __getattr__(self, name):
+        return getattr(self._tria, name)
+
+    def execute_coarsening_and_refinement(self):
+        t = self._tria
+        n0 = t.n_active_cells()
+        n_flag = sum(1 for c in t.active_cells() if c.refine_flag != "no_refinement")
+        self._guard.check(n0 + 7 * n_flag, n_now=n0, predicted=True)
+        t.execute_coarsening_and_refinement()
+        self._guard.check(t.n_active_cells(), n_now=n0, predicted=False)
 #: What each inversion code needs from the one mesh design (``spec["output_format"]``).
 #: The GoFEM files are always written: the viewers, the Refine tab and the plotting
 #: app read them.  ``ocean_modes``: the ocean models the code can take.  ``fit_topography``: deform the
@@ -747,8 +816,62 @@ def write_mesh_files(tria, materials: dict, names, receivers_projected, out_dir:
     return paths
 
 
+def _apply_ops(tria, all_ops, start_idx, stop, *, guard, earth_ids, air_id, dem, receivers,
+               log=print) -> None:
+    """Refinement ops ``start_idx`` .. ``stop - 1`` of :func:`run`, each through the
+    cell-count guard."""
+    import numpy as np
+
+    refine_at_interface = _pygofem("refine_at_interface")
+    refine_around_points = _pygofem("refine_around_points")
+    refine_within_polygon = _pygofem("refine_within_polygon")
+    real_tria = tria
+    tria = _GuardedTria(real_tria, guard)
+    for i, op in enumerate(all_ops[start_idx:stop], start=start_idx):
+        kind = op.get("op")
+        rep = int(op.get("repeat", 1))
+        pnorm = op.get("pnorm", 2)
+        before = real_tria.n_active_cells()
+        guard.step = "refinement #%d (%s)" % (i, kind)
+        if kind == "interface":
+            ids = _resolve_material_ids(op.get("material_ids"), earth_ids)
+            if op.get("ocean_surface") and dem is not None:
+                for _r in range(rep):       # earth below, then the water cells above
+                    refine_at_interface(
+                        tria, material_ids=ids, repeat=1, center=op.get("center", [0, 0, 0]),
+                        radii=op["radii"], pnorm=pnorm)
+                    refine_air_over_ocean(tria, dem.ocean_elevation, air_id, earth_ids)
+            else:
+                refine_at_interface(
+                    tria, material_ids=ids, repeat=rep,
+                    center=op.get("center", [0, 0, 0]), radii=op["radii"], pnorm=pnorm)
+        elif kind == "coast":
+            refine_coast(tria, op.get("points", []), op["radii"], pnorm,
+                         op.get("exclude", [air_id]), rep)
+        elif kind == "points":
+            refine_around_points(
+                tria, points=op.get("points", [[0, 0, 0]]),
+                center=op.get("center", [0, 0, 0]), radii=op["radii"], repeat=rep,
+                exclude_materials=op.get("exclude", [air_id]), pnorm=pnorm)
+        elif kind == "receivers":
+            idx = op.get("rec_idx")
+            pts = (np.asarray(receivers)[idx, :].tolist() if idx else receivers)
+            refine_around_points(
+                tria, points=pts, center=op.get("center", [0, 0, 0]),
+                radii=op["radii"], repeat=rep,
+                exclude_materials=op.get("exclude", [air_id]), pnorm=pnorm)
+        elif kind == "polygon":
+            refine_within_polygon(
+                tria, polygon=_resolve_polygon(op["polygon"]),
+                repeat=rep, z_range=op["z_range"], pnorm=pnorm)
+        else:
+            raise ValueError(f"refinement #{i}: unknown op {kind!r}")
+        log("  refine #%d (%s): +%d -> %d cells" % (
+            i, kind, tria.n_active_cells() - before, tria.n_active_cells()))
+
+
 def run(spec: dict, out_dir: str, log=print,
-        stop_after_refinement: int | None = None) -> dict:
+        stop_after_refinement: int | None = None, confirm=None) -> dict:
     """Build the inversion mesh in-process (needs PyDealII + gofem).
 
     Includes the ocean
@@ -759,6 +882,11 @@ def run(spec: dict, out_dir: str, log=print,
     ``stop_after_refinement``: when set, stop after applying that many
     refinement ops, write ``model_step<N>.vtu`` + return section clouds for the
     viewer, and skip topography / receiver projection / file writing.
+
+    ``confirm``: called as ``confirm(info) -> bool`` when the mesh is about to reach
+    (or has just reached) each of :data:`CELL_COUNT_CHECKPOINTS`; False stops the build
+    with :class:`MeshBuildCancelled` before anything is written (see
+    :class:`CellCountGuard`).  None = no checks.
     """
     import numpy as np
 
@@ -767,10 +895,6 @@ def run(spec: dict, out_dir: str, log=print,
 
     from . import edi_io
     from . import projection as P
-
-    refine_at_interface = _pygofem("refine_at_interface")
-    refine_around_points = _pygofem("refine_around_points")
-    refine_within_polygon = _pygofem("refine_within_polygon")
 
     os.makedirs(out_dir, exist_ok=True)
     air_id = AIR_ID
@@ -807,8 +931,13 @@ def run(spec: dict, out_dir: str, log=print,
     mantle_z = float(spec.get("mantle_depth_m", 410_000.0))
     mantle_res = float(spec.get("mantle_resistivity_ohm_m", 20.0))
 
+    guard = CellCountGuard(confirm, CELL_COUNT_CHECKPOINTS, log=log)
+
     def _build_base():
         # -- 2. base triangulation, 3. initial materials ---- #
+        guard.step = "the base grid"
+        n_base = len(dx) * len(dy) * len(dz)
+        guard.check(n_base, n_now=0, predicted=False)
         t = base_grid(dx, dy, dz, log=log)
         mats = initial_materials(t, bg_res, mantle_depth_m=mantle_z if mantle_on else None,
                                  mantle_resistivity_ohm_m=mantle_res, log=log)
@@ -890,48 +1019,17 @@ def run(spec: dict, out_dir: str, log=print,
     else:
         tria, materials = _build_base()
 
-    for i, op in enumerate(all_ops[start_idx:stop], start=start_idx):
-        kind = op.get("op")
-        rep = int(op.get("repeat", 1))
-        pnorm = op.get("pnorm", 2)
-        before = tria.n_active_cells()
-        if kind == "interface":
-            ids = _resolve_material_ids(op.get("material_ids"), earth_ids)
-            if op.get("ocean_surface") and dem is not None:
-                for _r in range(rep):       # earth below, then the water cells above
-                    refine_at_interface(
-                        tria, material_ids=ids, repeat=1, center=op.get("center", [0, 0, 0]),
-                        radii=op["radii"], pnorm=pnorm)
-                    refine_air_over_ocean(tria, dem.ocean_elevation, air_id, earth_ids)
-            else:
-                refine_at_interface(
-                    tria, material_ids=ids, repeat=rep,
-                    center=op.get("center", [0, 0, 0]), radii=op["radii"], pnorm=pnorm)
-        elif kind == "coast":
-            refine_coast(tria, op.get("points", []), op["radii"], pnorm,
-                         op.get("exclude", [air_id]), rep)
-        elif kind == "points":
-            refine_around_points(
-                tria, points=op.get("points", [[0, 0, 0]]),
-                center=op.get("center", [0, 0, 0]), radii=op["radii"], repeat=rep,
-                exclude_materials=op.get("exclude", [air_id]), pnorm=pnorm)
-        elif kind == "receivers":
-            idx = op.get("rec_idx")
-            pts = (np.asarray(receivers)[idx, :].tolist() if idx else receivers)
-            refine_around_points(
-                tria, points=pts, center=op.get("center", [0, 0, 0]),
-                radii=op["radii"], repeat=rep,
-                exclude_materials=op.get("exclude", [air_id]), pnorm=pnorm)
-        elif kind == "polygon":
-            refine_within_polygon(
-                tria, polygon=_resolve_polygon(op["polygon"]),
-                repeat=rep, z_range=op["z_range"], pnorm=pnorm)
-        else:
-            raise ValueError(f"refinement #{i}: unknown op {kind!r}")
-        log("  refine #%d (%s): +%d -> %d cells" % (
-            i, kind, tria.n_active_cells() - before, tria.n_active_cells()))
+    try:
+        _apply_ops(tria, all_ops, start_idx, stop, guard=guard, earth_ids=earth_ids,
+                   air_id=air_id, dem=dem, receivers=receivers, log=log)
+    except MeshBuildCancelled:
+        if preview:                  # the cached mesh may be part-refined: start over next time
+            with _preview_lock:
+                _preview_cache.__init__()
+        raise
     log("after refinement: %d cells, smallest %.0f m, largest %.0f m" % (
         tria.n_active_cells(), tria.minimal_cell_diameter(), tria.maximal_cell_diameter()))
+
 
     if preview:
         with _preview_lock:

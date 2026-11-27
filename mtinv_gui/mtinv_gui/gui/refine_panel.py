@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QToolBox, QVBoxLayout, QWidget,
 )
 
-from ..backends import gofem_files, refine
+from ..backends import gofem_files, refine, remap
 from ..plotting.gui.widgets import PathRow
 from .mesh_panel import _fmt_list, _parse_list
 from .mesh_viewer import MeshViewer
@@ -29,7 +29,14 @@ _MODES = [("Keep the existing stations", "none"),
           ("Replace them with a new dataset", "replace")]
 _FRAMES = [("Fit to the existing receivers' EDIs", "fit"),
            ("From a setup project (.mtinv.json)", "project"),
+           ("From a model frame file (model_frame.json)", "file"),
            ("Enter by hand", "manual")]
+_TARGET_FRAMES = [("From a setup project (.mtinv.json)", "project"),
+                  ("From a model frame file (model_frame.json)", "file"),
+                  ("Fit to its receivers' EDIs", "fit"),
+                  ("Enter by hand", "manual")]
+_WORKFLOWS = [("Refine this model (split cells, add stations)", "refine"),
+              ("Map it onto a new mesh (built in the Mesh tab)", "map")]
 _KIND_LABELS = {"box": "Box", "ellipse": "Ellipse", "polygon": "Polygon", "stations": "Around stations"}
 _PICKING_STYLE = "QPushButton { background-color: #c0392b; color: white; font-weight: bold; }"
 
@@ -193,7 +200,20 @@ class RefinePanel(BasePanel):
     # ---- pages -------------------------------------------------------- #
     def _page_model(self) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
+        outer = QVBoxLayout(w)
+        top = QFormLayout()
+        self.workflow = QComboBox()
+        for label, value in _WORKFLOWS:
+            self.workflow.addItem(label, value)
+        self.workflow.setToolTip(
+            "Refine: split this model's cells and put new stations on it.\n"
+            "Map: give a fresh mesh, built for the new data in the Mesh tab, this model's conductivities.\n"
+            "The new mesh is used exactly as it was built; only its material ids change.")
+        self.workflow.currentIndexChanged.connect(self._on_mode_changed)
+        top.addRow("What to Do", self.workflow)
+        outer.addLayout(top)
+        form = QFormLayout()
+        outer.addLayout(form)
         self.tria = PathRow("the model to refine, e.g. model_ZK_31.tria",
                             file_filter="deal.II triangulation (*.tria);;all files (*)")
         self.tria.changed.connect(self._on_tria_changed)
@@ -209,7 +229,78 @@ class RefinePanel(BasePanel):
         form.addRow(self.load_btn)
         self.model_lbl = _wrapped("no model loaded")
         form.addRow(self.model_lbl)
+        outer.addWidget(self._target_box())
+        outer.addStretch(1)
         return w
+
+    def _target_box(self) -> QGroupBox:
+        box = QGroupBox("Target Mesh")
+        outer = QVBoxLayout(box)
+        outer.addWidget(_wrapped(
+            "The new mesh, as the Mesh tab built it. Its cells with the Fill IDs get the model above's "
+            "conductivity, averaged over each cell's volume, each under a material id of its own; air, "
+            "sea and other ids keep theirs, and so do cells beyond the model. The model's own frame is "
+            "set on page 2."))
+        host = QWidget()
+        outer.addWidget(host)
+        form = QFormLayout(host)
+        form.setContentsMargins(0, 0, 0, 0)
+        self.t_tria = PathRow("the new mesh, e.g. model.tria", file_filter="deal.II triangulation (*.tria);;all files (*)")
+        self.t_materials = PathRow("its .materials", file_filter="materials (*.materials);;all files (*)")
+        self.t_receivers = PathRow("its receivers_projected.csv (copied to the output)",
+                                   file_filter="receivers (*.csv);;all files (*)")
+        self.t_frame = QComboBox()
+        for label, value in _TARGET_FRAMES:
+            self.t_frame.addItem(label, value)
+        self.t_frame_project = PathRow("the project the new mesh was built with",
+                                       file_filter="setup project (*.mtinv.json);;all files (*)")
+        self.t_frame_file = PathRow("model_frame.json", file_filter="frame (*.json);;all files (*)")
+        self.t_fit_edis = PathRow("EDIs of the new mesh's stations", kinds=("folder", "file"))
+        self.t_frame_crs = QLineEdit()
+        self.t_frame_crs.setPlaceholderText("e.g. EPSG:32615")
+        self.t_frame_x0 = _spin(-1e9, 1e9, 0.0, 3, " m")
+        self.t_frame_y0 = _spin(-1e9, 1e9, 0.0, 3, " m")
+        self.fill_ids = QLineEdit()
+        self.fill_ids.setToolTip("The new mesh's ids to fill: a fresh build's earth is 2. Others keep their values.")
+        self.map_smooth = _spin(0.0, 2.0, 0.25, 2, "")
+        self.map_smooth.setSingleStep(0.05)
+        self.map_smooth.setToolTip(
+            "Also blur the old cells' blocks: a Gaussian of this x the width (and thickness) of the old\n"
+            "cell at each point, as the smoothing on page 3. 0 = the old cells as they are.")
+        self.map_depth = QComboBox()
+        self.map_depth.addItem("Depth below the surface", "surface")
+        self.map_depth.addItem("Elevation", "elevation")
+        self.map_depth.setToolTip(
+            "Below the surface: a cell 300 m under the new surface reads the model 300 m under its own\n"
+            "surface, so different DEMs or cell sizes don't put new near-surface cells in the old air.")
+        form.addRow("Mesh", self.t_tria)
+        form.addRow("Materials", self.t_materials)
+        form.addRow("Receivers", self.t_receivers)
+        form.addRow("Its Frame", self.t_frame)
+        form.addRow("Setup Project", self.t_frame_project)
+        form.addRow("Frame File", self.t_frame_file)
+        form.addRow("Its EDIs", self.t_fit_edis)
+        form.addRow("CRS", self.t_frame_crs)
+        form.addRow("Origin Easting", self.t_frame_x0)
+        form.addRow("Origin Northing", self.t_frame_y0)
+        form.addRow("Fill IDs", self.fill_ids)
+        form.addRow("Smoothing", self.map_smooth)
+        form.addRow("Match Depth", self.map_depth)
+        self.target_form = form
+        self.t_frame_rows = {"project": [self.t_frame_project], "file": [self.t_frame_file],
+                             "fit": [self.t_fit_edis],
+                             "manual": [self.t_frame_crs, self.t_frame_x0, self.t_frame_y0]}
+        for row in (self.t_tria, self.t_materials, self.t_receivers, self.t_frame_project, self.t_frame_file,
+                    self.t_fit_edis):
+            row.changed.connect(self._store)
+        for widget in (self.t_frame_crs, self.fill_ids):
+            widget.editingFinished.connect(self._store)
+        for widget in (self.t_frame_x0, self.t_frame_y0, self.map_smooth):
+            widget.editingFinished.connect(self._store)
+        self.t_frame.currentIndexChanged.connect(self._store)
+        self.map_depth.currentIndexChanged.connect(self._store)
+        self.target_box = box
+        return box
 
     def _page_stations(self) -> QWidget:
         w = QWidget()
@@ -235,6 +326,9 @@ class RefinePanel(BasePanel):
                                      file_filter="setup project (*.mtinv.json);;all files (*)")
         self.frame_project.changed.connect(self._store)
         form.addRow("Setup project", self.frame_project)
+        self.frame_file = PathRow("model_frame.json the model was built in", file_filter="frame (*.json);;all files (*)")
+        self.frame_file.changed.connect(self._store)
+        form.addRow("Frame file", self.frame_file)
         self.frame_crs = QLineEdit()
         self.frame_crs.setPlaceholderText("e.g. EPSG:32609")
         self.frame_crs.editingFinished.connect(self._store)
@@ -244,7 +338,7 @@ class RefinePanel(BasePanel):
         self.frame_x0.editingFinished.connect(self._store)
         self.frame_y0.editingFinished.connect(self._store)
         form.addRow("Origin easting", self.frame_x0)
-        self.frame_rows = {"fit": [self.fit_edis], "project": [self.frame_project],
+        self.frame_rows = {"fit": [self.fit_edis], "project": [self.frame_project], "file": [self.frame_file],
                            "manual": [self.frame_crs, self.frame_x0, self.frame_y0]}
         self.stations_form = form
         form.addRow("Origin northing", self.frame_y0)
@@ -513,7 +607,23 @@ class RefinePanel(BasePanel):
         self._loading = True
         try:
             r = self.project.refine
+            self.workflow.setCurrentIndex(max(self.workflow.findData(r.workflow), 0))
             self.tria.setText(r.tria)
+            self.frame_file.setText(r.frame_file)
+            self.t_tria.setText(r.target_tria)
+            self.t_materials.setText(r.target_materials)
+            self.t_receivers.setText(r.target_receivers)
+            self.t_frame.setCurrentIndex(max(self.t_frame.findData(r.target_frame), 0))
+            here = self.project.path if self.project.workdir and os.path.isfile(self.project.path) else ""
+            self.t_frame_project.setText(r.target_frame_project or here)     # usually built in this project
+            self.t_frame_file.setText(r.target_frame_file)
+            self.t_fit_edis.setText(r.target_frame_fit_edis)
+            self.t_frame_crs.setText(r.target_frame_crs)
+            self.t_frame_x0.setValue(r.target_frame_x0)
+            self.t_frame_y0.setValue(r.target_frame_y0)
+            self.fill_ids.setText(", ".join(str(i) for i in r.fill_ids))
+            self.map_smooth.setValue(r.map_smooth)
+            self.map_depth.setCurrentIndex(max(self.map_depth.findData(r.map_depth), 0))
             self.materials.setText(r.materials)
             self.receivers.setText(r.receivers)
             self.mode.setCurrentIndex(max(self.mode.findData(r.station_mode), 0))
@@ -550,6 +660,18 @@ class RefinePanel(BasePanel):
             return
         r = self.project.refine
         r.tria, r.materials, r.receivers = self.tria.text(), self.materials.text(), self.receivers.text()
+        r.workflow = self.workflow.currentData()
+        r.frame_file = self.frame_file.text()
+        r.target_tria, r.target_materials = self.t_tria.text(), self.t_materials.text()
+        r.target_receivers, r.target_frame = self.t_receivers.text(), self.t_frame.currentData()
+        r.target_frame_project, r.target_frame_file = self.t_frame_project.text(), self.t_frame_file.text()
+        r.target_frame_fit_edis, r.target_frame_crs = self.t_fit_edis.text(), self.t_frame_crs.text().strip()
+        r.target_frame_x0, r.target_frame_y0 = self.t_frame_x0.value(), self.t_frame_y0.value()
+        try:
+            r.fill_ids = [int(v) for v in self.fill_ids.text().replace(",", " ").split()] or [2]
+        except ValueError:
+            self.log("fill ids must be whole numbers")
+        r.map_smooth, r.map_depth = self.map_smooth.value(), self.map_depth.currentData()
         r.station_mode = self.mode.currentData()
         r.stations_edi = self.edi.text()
         r.frame = self.frame.currentData()
@@ -579,9 +701,24 @@ class RefinePanel(BasePanel):
         widget.setVisible(on)
 
     def _update_visibility(self) -> None:
-        mode = self.mode.currentData()
+        mapping = self.workflow.currentData() == "map"
+        self.target_box.setVisible(mapping)
+        for k, kind in ((0, "project"), (1, "file"), (2, "fit"), (3, "manual")):
+            for w in self.t_frame_rows[kind]:
+                self._set_row_visible(self.target_form, w, mapping and self.t_frame.currentData() == kind)
+        self.toolbox.setItemEnabled(2, not mapping)
+        self.toolbox.setItemEnabled(3, not mapping)
+        self.toolbox.setItemText(1, "2 · Model Frame" if mapping else "2 · Stations")
+        self.build_btn.setText("Build Mapped Model" if mapping else "Build Refined Model")
+        self.estimate_btn.setToolTip("Do the mapping without saving anything." if mapping else
+                                     "Run the refinement without saving anything, to get the real cell count.")
+        self._set_row_visible(self.stations_form, self.mode, not mapping)
+        self.write_gofem.setVisible(not mapping)
+        self.table.setVisible(not mapping)
+        self.station_lbl.setVisible(not mapping)
+        mode = "none" if mapping else self.mode.currentData()
         new_stations = mode != "none"
-        needs_frame = new_stations or (self.refit.isChecked() and self._dem_is_lonlat())
+        needs_frame = mapping or new_stations or (self.refit.isChecked() and self._dem_is_lonlat())
         frame = self.frame.currentData()
         form = self.stations_form
         self._set_row_visible(form, self.edi, new_stations)
@@ -605,7 +742,7 @@ class RefinePanel(BasePanel):
              if self.smooth_mode.currentData() == "relative" else
              "Too long for fine cells can mean billions of cell pairs: the build stops if so.")
             if smooth else "")
-        gofem = self.write_gofem.isChecked()
+        gofem = self.write_gofem.isChecked() and not mapping
         use_old = gofem and mode != "replace"
         self._set_row_visible(self._output_form(), self.old_data, use_old)
         self._set_row_visible(self._output_form(), self.old_freq, use_old)
@@ -1149,6 +1286,9 @@ class RefinePanel(BasePanel):
         if write and not out_dir:
             self.result_lbl.setText("choose an output folder on page 5")
             return
+        if r.workflow == "map":
+            self._start_map(write)
+            return
         if r.refit and r.refit_dem and not (self._dem_check and self._dem_check[0] == self._dem_key()):
             self._check_dem(then=lambda: self._start(write))    # comes back here with the answer
             return
@@ -1183,6 +1323,47 @@ class RefinePanel(BasePanel):
             return result
 
         run_async(self, job, self._after_run, self._error)
+
+    def _start_map(self, write: bool) -> None:
+        r = self.project.refine
+        if not r.materials or not os.path.isfile(r.materials):
+            self.result_lbl.setText("choose the model's .materials on page 1")
+            return
+        if not r.target_tria or not os.path.isfile(r.target_tria) or not os.path.isfile(r.target_materials):
+            self.result_lbl.setText("choose the new mesh's .tria and .materials under Target Mesh on page 1")
+            return
+        stem = r.stem if r.stem and r.stem != "model_refined" else "model_mapped"
+        if write:
+            existing = [p for p in remap.output_paths(r.out_dir, stem).values() if os.path.isfile(p)]
+            if existing:
+                names = "\n".join(os.path.basename(p) for p in existing)
+                answer = QMessageBox.question(self, "Overwrite files?",
+                                              f"These are already in the output folder:\n\n{names}\n\nOverwrite them?")
+                if answer != QMessageBox.Yes:
+                    return
+        spec = {**remap.spec_from_info(r), "stem": stem}
+        out_dir = r.out_dir
+        self._set_busy(True)
+        self.result_lbl.setText("mapping..." if write else "mapping (nothing saved)...")
+        run_async(self, lambda: remap.run(spec, out_dir, log=self.log, write=write), self._after_map, self._error)
+
+    def _after_map(self, res: dict) -> None:
+        self._set_busy(False)
+        lines = [f"<b>{res['cells']:,} of the new mesh's {res['n_cells']:,} cells filled</b>",
+                 f"model frame: {res['frames'][0]}", f"new mesh frame: {res['frames'][1]}"]
+        if res["kept"]:
+            lines.append(f"{res['kept']:,} cells beyond the model keep their value")
+        if len(res["log10"]):
+            lines.append(f"log10 conductivity {res['log10'].min():.2f} to {res['log10'].max():.2f} "
+                         f"(median {np.median(res['log10']):.2f})")
+        self._set_cells(res["cells_model"], ", mapped" if "paths" in res else ", mapped (not saved)")
+        if "paths" in res:
+            lines.append("written to <b>" + os.path.dirname(res["paths"]["tria"]) + "</b>")
+            self._show_model(res)
+        else:
+            lines.append("nothing saved")
+        self.result_lbl.setText("<br>".join(lines))
+        self.log(f"map: {res['cells']:,} cells filled" + (", written" if "paths" in res else ""))
 
     def _after_run(self, res: dict) -> None:
         self._set_busy(False)

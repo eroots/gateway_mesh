@@ -437,7 +437,7 @@ SMOOTH_MODES = {
 }
 _KEY = 1 << 40                              # (level, index) -> one integer
 #: neighbour pairs per batch, and the most a smoothing may need in all
-_PAIRS_PER_BATCH = 20_000_000
+_PAIRS_PER_BATCH = 5_000_000
 _PAIRS_LIMIT = 3_000_000_000
 
 
@@ -1285,7 +1285,7 @@ def _check_project_frame(path: str, georef, receivers_path: str) -> str:
 
 
 def resolve_georef(spec: dict):
-    """The model's frame, from ``spec["frame"]`` (``project`` / ``fit`` / ``manual``).
+    """The model's frame, from ``spec["frame"]`` (``project`` / ``fit`` / ``file`` / ``manual``).
     Returns ``(georef, description)``."""
     from ..plotting.backends import georef as G
     from ..plotting.backends.model_source import GoFEMVtuSource
@@ -1311,6 +1311,14 @@ def resolve_georef(spec: dict):
                              f"with, or enter the frame by hand.")
         return fit.georef, (f"fitted to {fit.n_matched} receivers: {G.crs_label(fit.georef.crs)}, "
                             f"{fit.rms_m:.2f} m rms")
+    if kind == "file":
+        from . import projection as P
+
+        path = spec.get("frame_file", "")
+        if not path or not os.path.isfile(path):
+            raise ValueError("choose the model frame file (model_frame.json) the mesh was built in")
+        gr = G.from_frame(P.load_frame(path))
+        return gr, f"from {os.path.basename(path)}: {G.crs_label(gr.crs)}"
     if kind == "manual":
         gr = G.manual(spec.get("frame_crs", ""), float(spec.get("frame_x0", 0.0)),
                       float(spec.get("frame_y0", 0.0)))

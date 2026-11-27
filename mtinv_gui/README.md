@@ -181,7 +181,11 @@ error if the API differs.
 3. Data tab: "Compute SSQ resistivity + C-response depth"; set the period window.
 4. Mesh tab: "Recompute from data", walk the QToolBox pages, use "preview to
    step" to watch it refine in the in-app 3-D viewer, then "Build full mesh →
-   files". **Mesh For** "GoFEM + FEMTIC" also writes `mesh.dat` and
+   files". Both stop and ask before the mesh passes **500,000** cells and again
+   before **1,000,000**: before a refinement step runs if the cells it has flagged
+   would take it past (each splits into 8; deal.II's smoothing can add ~10 % more, so
+   that count is a lower bound), and right after a step that did. **Stop the build**
+   ends it with nothing written. **Mesh For** "GoFEM + FEMTIC" also writes `mesh.dat` and
    `resistivity_block_iter0.dat` (air = block 0, the sea and a mantle fixed, one free block
    per earth cell); FEMTIC takes no ocean or the real one, not the thin sheet.
    **Mesh For** "GoFEM + SimPEG" also writes an octree for SimPEG (`octree_mesh.txt`, UBC
@@ -238,6 +242,17 @@ cell as its own parameter.
    run in order, and the arrows change it. A new box or ellipse starts centred on the
    new stations if there are any, or else on the model's own. **Smooth the Refined Cells**
    (optional, below the rules) is described after this list.
+
+   A rule's **Action** can be **Coarsen** instead: it merges split cells back into their
+   parents (8 into 1), **Levels** times, never past the model's original grid. **Where**:
+   *outside the region* merges every cell whose parent stays clear of the region (grown by
+   the **Margin**, down to its depth), which thins out the padding of an inherited model while
+   keeping the domain's size; *inside* merges cells whose parent touches it. **Coarsen Up to
+   Cell Size** stops it making cells wider than that. Merged inverted cells get a new material
+   id with the volume-weighted mean of their log10 conductivity; air, sea and the fixed ids
+   only merge with their own kind, so air and earth never share a cell. Put a coarsening rule
+   before the refining ones. On a 364k-cell inverted model, one level outside a 300 km box
+   left 74k cells (two levels: 35k).
 4. **Topography (optional):** refining leaves the surface exactly where it is. To
    follow a DEM more closely, the refit moves the surface by the difference from where
    it is now. It can't apply the relief twice, and it only changes the area the DEM
@@ -258,6 +273,28 @@ The station map shows a plan-view slice through the model, as true cells coloure
 resistivity. Move through depths with the slider, or the mouse wheel over the map. Depth
 is below sea level. **Estimate** and **Build** switch it to the refined model, so you can
 see what a rule did before saving anything.
+
+**Map onto a new mesh** (page 1, *What to Do*) is the other way to start a new inversion from an
+old model: build a fresh mesh for the new data in the Mesh tab, then give it the old model's
+conductivities. Nothing is refined, and the new mesh is used exactly as built; only its material
+ids change. Page 1's *Target Mesh* takes the new mesh's `.tria`, `.materials` and receivers and its
+frame (the setup project it was built in, a `model_frame.json`, a fit to its stations' EDIs, or typed
+in); page 2 takes the old model's frame, as for new stations. The two can use different
+projections and origins.
+
+* Each cell with a **Fill ID** (a fresh build's earth is 2) gets the old model's log10
+  conductivity **averaged over its volume**, every old cell counting by the volume it shares with
+  it: a cell smaller than the old ones gets the old cell it sits in (exactly, where the meshes
+  match), a larger one the volume average of the old cells it covers. Each gets its own material
+  id, from 1000, as an inverted model has. Air, sea and other ids keep their values, and so do
+  cells beyond the old model.
+* **Smoothing** also blurs the old cells' blocks with a Gaussian of that times the old cell's size
+  (0 = the old cells as they are). Both are computed in closed form, not on a grid.
+* **Match Depth**: *below the surface* (default) reads a cell 300 m under the new surface from 300 m
+  under the old one, so different DEMs don't put new near-surface cells in the old air; or
+  *elevation*.
+* It writes `model_mapped.tria` / `.vtu` / `.materials` (the new mesh's, with the new ids added), a
+  mask if asked, and a copy of the new mesh's receivers, which still fit since the mesh is unchanged.
 
 Every station is checked against the finished mesh before anything is saved: earth at
 its depth (0.1 m below the surface), and air or water just above it. If one fails, the
