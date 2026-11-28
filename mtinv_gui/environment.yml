@@ -420,5 +420,5 @@ dependencies:
       - discretize==0.11.3
       # Pinned to a release tag: older gateway_mt code requires vtk>=9.3 and
       # pyproj>=3.6, and pip would replace the pinned builds above to satisfy them.
-      - gateway_mt @ git+https://github.com/eroots/gateway_mt.git@v0.20.0
+      - gateway_mt @ git+https://github.com/eroots/gateway_mt.git@v0.20.1
       - -e .
